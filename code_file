@@ -1,0 +1,332 @@
+--code1: transform logs to dataset (.csv)
+
+import json
+import csv
+
+input_file = "all_data.json"
+output_file = "dataset.csv"
+
+with open(input_file, "r") as f, open(output_file, "w", newline='', encoding="utf-8") as out:
+    writer = csv.writer(out)
+
+    writer.writerow([
+        "event_id",
+        "process",
+        "parent_process",
+        "command_line",
+        "user",
+        "timestamp",
+        "command_length"
+    ])
+
+    for line in f:
+        try:
+            log = json.loads(line)
+
+            provider = log.get("data", {}).get("win", {}).get("system", {}).get("providerName", "")
+
+            if provider == "Microsoft-Windows-Sysmon":
+
+                system = log.get("data", {}).get("win", {}).get("system", {})
+                data = log.get("data", {}).get("win", {}).get("eventdata", {})
+
+                event_id = system.get("eventID", "")
+
+
+                process = data.get("image", "")
+                parent = data.get("parentImage", "")
+                command = data.get("commandLine", "")
+                user = data.get("user", "")
+
+                timestamp = log.get("timestamp", "")
+
+                command_length = len(str(command).split())
+
+                writer.writerow([
+                    event_id,
+                    process,
+                    parent,
+                    command,
+                    user,
+                    timestamp,
+                    command_length
+                ])
+
+        except:
+            continue
+---------------------------------------------
+--code2: encoding code 
+
+import pandas as pd
+
+
+df = pd.read_csv("dataset.csv")
+
+
+df["process"] = df["process"].fillna("unknown").astype(str)
+df["parent_process"] = df["parent_process"].fillna("unknown").astype(str)
+df["command_line"] = df["command_line"].fillna("").astype(str)
+df["user"] = df["user"].fillna("unknown").astype(str)
+
+
+df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+
+df = df.dropna(subset=["timestamp"])
+
+
+df["time_window"] = df["timestamp"].dt.floor("1min")
+
+# process lowercase
+df["process_lower"] = df["process"].str.lower()
+df["command_lower"] = df["command_line"].str.lower()
+
+
+def classify_process(p):
+    p = str(p).lower()
+
+    if "powershell" in p:
+        return "powershell"
+    elif "cmd.exe" in p:
+        return "cmd"
+    elif "chrome" in p or "msedge" in p or "firefox" in p or "opera" in p:
+        return "browser"
+    elif (
+        "svchost" in p
+        or "system32\\services.exe" in p
+        or "runtimebroker" in p
+        or "searchapp" in p
+        or "shellexperiencehost" in p
+        or "textinputhost" in p
+        or "dllhost" in p
+        or "taskhostw" in p
+        or "wmiadap" in p
+        or "mpcmdrun" in p
+    ):
+        return "system"
+    elif "notepad" in p or "wordpad" in p or "code.exe" in p:
+        return "editor"
+    elif "explorer.exe" in p:
+        return "explorer"
+    else:
+        return "other"
+
+df["process_category"] = df["process"].apply(classify_process)
+
+# ===== Features على مستوى الحدث =====
+df["is_powershell"] = df["process_category"].apply(lambda x: 1 if x == "powershell" else 0)
+df["is_cmd"] = df["process_category"].apply(lambda x: 1 if x == "cmd" else 0)
+df["is_browser"] = df["process_category"].apply(lambda x: 1 if x == "browser" else 0)
+df["is_system"] = df["process_category"].apply(lambda x: 1 if x == "system" else 0)
+df["is_editor"] = df["process_category"].apply(lambda x: 1 if x == "editor" else 0)
+df["is_explorer"] = df["process_category"].apply(lambda x: 1 if x == "explorer" else 0)
+df["is_other"] = df["process_category"].apply(lambda x: 1 if x == "other" else 0)
+
+df["has_whoami"] = df["command_lower"].apply(lambda x: 1 if "whoami" in x else 0)
+df["has_net_user"] = df["command_lower"].apply(lambda x: 1 if "net user" in x else 0)
+df["has_encoded"] = df["command_lower"].apply(lambda x: 1 if "-enc" in x else 0)
+df["has_nop"] = df["command_lower"].apply(lambda x: 1 if "-nop" in x else 0)
+df["has_getprocess"] = df["command_lower"].apply(lambda x: 1 if "get-process" in x else 0)
+df["has_getservice"] = df["command_lower"].apply(lambda x: 1 if "get-service" in x else 0)
+
+# event_id رقمي
+df["event_id"] = pd.to_numeric(df["event_id"], errors="coerce").fillna(0)
+
+df["is_event_1"] = (df["event_id"] == 1).astype(int)
+df["is_event_3"] = (df["event_id"] == 3).astype(int)
+df["is_event_5"] = (df["event_id"] == 5).astype(int)
+df["is_event_11"] = (df["event_id"] == 11).astype(int)
+df["is_event_12"] = (df["event_id"] == 12).astype(int)
+df["is_event_13"] = (df["event_id"] == 13).astype(int)
+df["is_event_22"] = (df["event_id"] == 22).astype(int)
+
+# command length
+df["command_length"] = pd.to_numeric(df["command_length"], errors="coerce").fillna(0)
+
+
+grouped = df.groupby("time_window").agg(
+    total_events=("event_id", "count"),
+    powershell_count=("is_powershell", "sum"),
+    cmd_count=("is_cmd", "sum"),
+    browser_count=("is_browser", "sum"),
+    system_count=("is_system", "sum"),
+    editor_count=("is_editor", "sum"),
+    explorer_count=("is_explorer", "sum"),
+    other_count=("is_other", "sum"),
+    whoami_count=("has_whoami", "sum"),
+    net_user_count=("has_net_user", "sum"),
+    encoded_count=("has_encoded", "sum"),
+    nop_count=("has_nop", "sum"),
+    getprocess_count=("has_getprocess", "sum"),
+    getservice_count=("has_getservice", "sum"),
+    event1_count=("is_event_1", "sum"),
+    event3_count=("is_event_3", "sum"),
+    event5_count=("is_event_5", "sum"),
+    event11_count=("is_event_11", "sum"),
+    event12_count=("is_event_12", "sum"),
+    event13_count=("is_event_13", "sum"),
+    event22_count=("is_event_22", "sum"),
+    avg_command_length=("command_length","mean"),
+    max_command_length=("command_length", "max"),
+).reset_index()
+
+
+grouped["hour"] = grouped["time_window"].dt.hour
+
+
+grouped.to_csv("behavioral_dataset.csv", index=False)
+
+print("behavioral_dataset.csv created successfully")
+print(grouped.head())
+print("Number of windows:", len(grouped))
+------------------------------------------------
+--code3:training and detection code 
+
+import pandas as pd
+from sklearn.ensemble import IsolationForest
+from sklearn.metrics import confusion_matrix, classification_report, accuracy_score, precision_score, recall_score, f1_score
+
+
+
+
+df = pd.read_csv("behavioral_dataset.csv")
+
+
+df = df.fillna(0)
+
+# =========================
+# Feature Engineering
+# =========================
+df["attack_score"] = (
+    df["powershell_count"] * 3 +
+    df["cmd_count"] * 2 +
+    df["net_user_count"] * 5 +
+    df["whoami_count"] * 3 +
+    df["encoded_count"] * 4 +
+    df["nop_count"] * 3 +
+    df["getprocess_count"] * 2 +
+    df["getservice_count"] * 2
+)
+
+
+
+
+feature_cols = [
+    "total_events",
+    "powershell_count",
+    "cmd_count",
+    "browser_count",
+    "system_count",
+    "editor_count",
+    "explorer_count",
+    "other_count",
+    "whoami_count",
+    "net_user_count",
+    "encoded_count",
+    "nop_count",
+    "getprocess_count",
+    "getservice_count",
+    "event1_count",
+    "event3_count",
+    "event5_count",
+    "event11_count",
+    "event12_count",
+    "event13_count",
+    "event22_count",
+    "avg_command_length",
+    "max_command_length",
+    "hour",
+    "attack_score"
+]
+
+X = df[feature_cols]
+
+
+
+
+model = IsolationForest(
+    n_estimators=100,
+    contamination=0.2,
+    random_state=42
+)
+
+model.fit(X)
+
+
+
+
+df["anomaly"] = model.predict(X)
+df["anomaly"] = df["anomaly"].map({1: 0, -1: 1})
+
+
+
+
+df.to_csv("behavioral_results.csv", index=False)
+
+print("behavioral_results.csv created successfully")
+
+
+
+
+print("\nAnomaly counts:")
+print(df["anomaly"].value_counts())
+
+print("\nDetected anomalous windows:")
+print(df[df["anomaly"] == 1][[
+    "time_window",
+    "total_events",
+    "powershell_count",
+    "cmd_count",
+    "browser_count",
+    "system_count",
+    "whoami_count",
+    "net_user_count",
+    "attack_score",
+    "anomaly"
+]].head(20))
+
+
+
+
+
+
+df["true_label"] = (
+    (df["powershell_count"] > 0) |
+    (df["cmd_count"] > 0) |
+    (df["net_user_count"] > 0) |
+    (df["whoami_count"] > 0)
+).astype(int)
+
+
+cm = confusion_matrix(df["true_label"], df["anomaly"])
+
+cm_df = pd.DataFrame(
+    cm,
+    index=["Actual Normal (0)", "Actual Suspicious (1)"],
+    columns=["Predicted Normal (0)", "Predicted Anomaly (1)"]
+)
+
+print("\n" + "="*50)
+print(" CONFUSION MATRIX ")
+print("="*50)
+print(cm_df)
+
+
+accuracy = accuracy_score(df["true_label"], df["anomaly"])
+precision = precision_score(df["true_label"], df["anomaly"])
+recall = recall_score(df["true_label"], df["anomaly"])
+f1 = f1_score(df["true_label"], df["anomaly"])
+
+print("\n" + "="*50)
+print(" PERFORMANCE METRICS ")
+print("="*50)
+print(f"{'Accuracy':<15}: {accuracy:.4f}")
+print(f"{'Precision':<15}: {precision:.4f}")
+print(f"{'Recall':<15}: {recall:.4f}")
+print(f"{'F1-score':<15}: {f1:.4f}")
+
+
+print("\n" + "="*50)
+print(" CLASSIFICATION REPORT ")
+print("="*50)
+print(classification_report(df["true_label"], df["anomaly"]))
